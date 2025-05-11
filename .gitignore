@@ -1,0 +1,13 @@
+# files
+*.ipynb
+*.html
+.env
+*.png
+
+# dir
+venv
+__pycache__
+.vscode
+source
+judgments
+logs
