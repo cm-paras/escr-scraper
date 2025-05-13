@@ -16,7 +16,7 @@ from src.parser import batch_process_judgments, case_details_parser
 load_dotenv()
 
 DISPLAY_CASE = 1000
-BATCH_SIZE = 25
+BATCH_SIZE = 10
 STATE_CODE = 7
 COURT_CODE = 2
 
@@ -91,13 +91,13 @@ def process_case_batch(
             local_path = scraper.download_judgment(case_detail["url"])
             if local_path:
                 # Upload to Azure and get URL
-                # azure_url = upload_to_azure_and_delete_local(local_path, blob_service_client, container_name)
-                # case_detail["azure_url"] = azure_url
-                case_detail["local_url"] = local_path
+                azure_url = upload_to_azure_and_delete_local(local_path, blob_service_client, container_name)
+                case_detail["url"] = azure_url
+                # case_detail["local_url"] = local_path
             else:
                 logger.warning(f"Failed to download PDF for case: {case_detail.get('title', 'Unknown')}")
-                case_detail["azure_url"] = ""
-                case_detail["local_url"] = ""
+                # case_detail["azure_url"] = ""
+                # case_detail["local_url"] = ""
 
             return case_detail
 
