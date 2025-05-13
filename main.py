@@ -1,16 +1,24 @@
-import math
-import re
-import os
-from dotenv import load_dotenv
-from typing import List, Dict, Any
 import logging
+import math
+import os
+import re
+from time import sleep
+from typing import Any, Dict, List
+
 from azure.storage.blob import BlobServiceClient
+from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.errors import BulkWriteError, ServerSelectionTimeoutError
+
 from src.api import ECourtsScraper
-from src.parser import case_details_parser, batch_process_judgments
+from src.parser import batch_process_judgments, case_details_parser
 
 load_dotenv()
+
+DISPLAY_CASE = 1000
+BATCH_SIZE = 25
+STATE_CODE = 7
+COURT_CODE = 2
 
 
 # Configure logging
@@ -83,8 +91,8 @@ def process_case_batch(
             local_path = scraper.download_judgment(case_detail["url"])
             if local_path:
                 # Upload to Azure and get URL
-                azure_url = upload_to_azure_and_delete_local(local_path, blob_service_client, container_name)
-                case_detail["azure_url"] = azure_url
+                # azure_url = upload_to_azure_and_delete_local(local_path, blob_service_client, container_name)
+                # case_detail["azure_url"] = azure_url
                 case_detail["local_url"] = local_path
             else:
                 logger.warning(f"Failed to download PDF for case: {case_detail.get('title', 'Unknown')}")
@@ -137,14 +145,14 @@ def main():
         logger.error(f"Failed to connect to MongoDB: {str(e)}")
         raise
 
-    # Initialize scraper
-    scraper = ECourtsScraper()
-
     try:
+
+        scraper = ECourtsScraper()
+
         # Initial search to get total records
         search_results = scraper.search_cases(
-            state_code="7",  # Delhi state code
-            court_type="2",  # High Court
+            state_code=str(STATE_CODE),  # Delhi state code
+            court_type=str(COURT_CODE),  # High Court
         )
 
         if not search_results or not search_results.get("reportrow"):
@@ -152,28 +160,35 @@ def main():
             return
 
         total_records = int(search_results["reportrow"]["iTotalRecords"])
-        batch_size = 100  # Process 100 cases per batch
-        total_requests = math.ceil(total_records / 1000)
-
+        total_requests = math.ceil(total_records / DISPLAY_CASE)
         logger.info(f"Total records: {total_records}, Total requests: {total_requests}")
 
         for req_no in range(total_requests):
             logger.info(f"Processing request {req_no + 1}/{total_requests}")
 
+            start_from = req_no * DISPLAY_CASE
+            logger.info(f"Fetching results from index {start_from} with length {DISPLAY_CASE}")
+
             search_results = scraper.search_cases(
-                state_code="7", court_type="2", start_from=req_no * 1000, display_length=1000
+                state_code=STATE_CODE, court_type=COURT_CODE, start_from=start_from, display_length=DISPLAY_CASE
             )
 
             if not search_results or not search_results.get("reportrow"):
-                logger.warning(f"No results for request {req_no + 1}")
-                continue
+                logger.warning(f"No results for batch starting at {start_from}")
+                return None, None
 
             data = search_results["reportrow"]["aaData"]
+            logger.info(f"Retrieved {len(data)} results starting at index {start_from}")
+
+            if data is None or scraper is None:
+                continue
 
             # Process in batches
-            for i in range(0, len(data), batch_size):
-                batch = data[i : i + batch_size]
+            for i in range(0, len(data), BATCH_SIZE):
+                batch = data[i : i + BATCH_SIZE]
                 process_case_batch(batch, scraper, blob_service_client, container_name, collection)
+
+            sleep(3)
 
         logger.info("Processing complete")
 

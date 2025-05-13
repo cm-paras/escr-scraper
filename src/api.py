@@ -14,6 +14,12 @@ from azure.cognitiveservices.vision.computervision.models import OperationStatus
 from msrest.authentication import CognitiveServicesCredentials
 
 
+import random
+import time
+from functools import wraps
+from requests.exceptions import RequestException
+
+
 # Configure logging
 def setup_logger(name: str = "scraper", level: int = logging.INFO) -> logging.Logger:
     logger = logging.getLogger(name)
@@ -33,6 +39,47 @@ def setup_logger(name: str = "scraper", level: int = logging.INFO) -> logging.Lo
     logger.addHandler(file_handler)
 
     return logger
+
+
+def rate_limit(min_delay=1, max_delay=3):
+    """Decorator to add rate limiting to requests"""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = random.uniform(min_delay, max_delay)
+            time.sleep(delay)
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def retry_request(max_retries=3, retry_delay=2):
+    """Decorator to retry requests on failure"""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            instance = args[0]
+            last_exception = None
+            for attempt in range(max_retries + 1):
+                try:
+                    if attempt > 0:
+                        instance.logger.info(f"Retry attempt {attempt}/{max_retries}")
+                    return func(*args, **kwargs)
+                except RequestException as e:
+                    last_exception = e
+                    instance.logger.warning(f"Request failed: {str(e)}, retrying in {retry_delay}s")
+                    time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+
+            instance.logger.error(f"Max retries exceeded. Last error: {str(last_exception)}")
+            raise last_exception
+
+        return wrapper
+
+    return decorator
 
 
 class ECourtsScraper:
@@ -105,15 +152,36 @@ class ECourtsScraper:
             raise
 
     def verify(self):
+        """Improved CAPTCHA verification with better error handling"""
+        self.logger.info("Starting CAPTCHA verification process")
         for attempt in range(self.max_captcha_attempts):
             self.logger.info(f"Verification attempt {attempt + 1}/{self.max_captcha_attempts}")
-            if self.get_captcha():
-                captcha_code = self.solve_captcha()
-                if self.verify_captcha(captcha_code):
-                    self.verified = True
-                    self.logger.info("CAPTCHA verification successful")
-                    return
-            self.logger.warning(f"CAPTCHA attempt {attempt + 1} failed")
+
+            try:
+                # First, make sure our session is fresh
+                # if attempt > 0:
+                #     self.initialize_session()
+
+                # Get and solve the CAPTCHA
+                if self.get_captcha():
+                    captcha_code = self.solve_captcha()
+
+                    if captcha_code and self.verify_captcha(captcha_code):
+                        self.verified = True
+                        self.logger.info("CAPTCHA verification successful")
+                        return True
+                    else:
+                        self.logger.warning(f"CAPTCHA solution '{captcha_code}' was incorrect")
+                else:
+                    self.logger.warning("Failed to get CAPTCHA image")
+
+                # Add a delay between attempts to avoid being flagged
+                time.sleep(2 + attempt)
+
+            except Exception as e:
+                self.logger.error(f"Error during CAPTCHA verification attempt: {str(e)}")
+                time.sleep(3)
+
         self.logger.error("Failed to verify CAPTCHA after maximum attempts")
         raise ValueError("CAPTCHA verification failed")
 
@@ -123,10 +191,16 @@ class ECourtsScraper:
             self.app_token = response_data["app_token"]
             self.logger.debug(f"Updated app_token")
 
-    def get_captcha(self, save_path="captcha.png"):
+    def get_captcha(self, url=None, save_path="captcha.png"):
         """Get CAPTCHA image and save it to a file"""
         try:
-            captcha_url = urljoin(self.BASE_URL, f"vendor/securimage/securimage_show.php?{int(time.time() * 1000)}")
+            if not url:
+                captcha_url = urljoin(
+                    self.BASE_URL, f"vendor/securimage/securimage_show.php?{int(time.time() * 1000)}"
+                )
+            else:
+                captcha_url = urljoin(self.BASE_URL, url)
+
             self.logger.info(f"Fetching CAPTCHA from {captcha_url}")
 
             img_response = self.session.get(
@@ -245,14 +319,17 @@ class ECourtsScraper:
             self.logger.error(f"Error verifying CAPTCHA: {str(e)}", exc_info=True)
             return False
 
+    # @rate_limit(min_delay=2, max_delay=5)
+    # @retry_request(max_retries=3)
     def search_cases(
         self,
+        page="1",
         search_text="",
         captcha_solution="",
         state_code="",
         dist_code="",
         court_type="2",
-        display_length=1000,
+        display_length=10,
         start_from=0,
         search_opt="PHRASE",
     ):
@@ -265,7 +342,7 @@ class ECourtsScraper:
             return None
 
         data = {
-            "sEcho": "1",
+            "sEcho": str(page),
             "iColumns": "2",
             "sColumns": ",",
             "iDisplayStart": str(start_from),
@@ -291,8 +368,8 @@ class ECourtsScraper:
             "search_txt4": "",
             "search_txt5": "",
             "pet_res": "",
-            "state_code": state_code,
-            "state_code_li": "",
+            "state_code": "",
+            "state_code_li": state_code,
             "dist_code": dist_code,
             "case_no": "",
             "case_year": "",
@@ -331,6 +408,10 @@ class ECourtsScraper:
             "neu_no": "",
             "ajax_req": "true",
             "app_token": self.app_token,
+            "int_fin_party_val": "undefined",
+            "int_fin_case_val": "undefined",
+            "int_fin_court_val": "undefined",
+            "int_fin_decision_val": "undefined",
         }
 
         try:
@@ -353,14 +434,38 @@ class ECourtsScraper:
             self.logger.error(f"Error during search: {str(e)}", exc_info=True)
             return None
 
-    def download_judgment(self, path, val="0", citation_year="", output_dir="judgments"):
-        """Download a judgment PDF file"""
+    # @rate_limit(min_delay=0.5, max_delay=2)
+    # @retry_request(max_retries=3)
+    def download_judgment(self, pdf_detail, val="0", citation_year="", output_dir="judgments"):
+        """Download a judgment PDF file with UUID filename"""
         try:
+            val, path = pdf_detail
+            path = path.replace("&search=%20", "")
+
             os.makedirs(output_dir, exist_ok=True)
-            filename = os.path.basename(path.split("#")[0])
-            if not filename.lower().endswith(".pdf"):
-                filename += ".pdf"
-            output_path = os.path.join(output_dir, filename)
+
+            # Get original filename for reference
+            original_filename = os.path.basename(path.split("#")[0])
+            if not original_filename.lower().endswith(".pdf"):
+                original_filename += ".pdf"
+
+            # Generate UUID for the new filename
+            unique_id = str(uuid.uuid4())
+            uuid_filename = f"{unique_id}.pdf"
+            output_path = os.path.join(output_dir, uuid_filename)
+
+            # Create a mapping file to store original filename and UUID mapping
+            mapping_file = os.path.join(output_dir, "filename_mappings.json")
+            mapping_data = {}
+
+            # Load existing mappings if file exists
+            if os.path.exists(mapping_file):
+                try:
+                    with open(mapping_file, "r") as f:
+                        mapping_data = json.load(f)
+                except json.JSONDecodeError:
+                    self.logger.error("Error reading mapping file, creating new one")
+                    mapping_data = {}
 
             pdf_info_url = "https://judgments.ecourts.gov.in/pdfsearch/?p=pdf_search/openpdfcaptcha"
             path_with_params = (
@@ -400,9 +505,45 @@ class ECourtsScraper:
             pdf_info_response = self.session.post(pdf_info_url, headers=pdf_headers, data=data)
             pdf_info_response.raise_for_status()
 
+            print(pdf_info_response.text)
+
             try:
                 pdf_info_result = pdf_info_response.json()
                 self.update_app_token(pdf_info_result)
+
+                # Check if the response contains 'filename' which indicates captcha is needed
+                if "filename" in pdf_info_result:
+
+                    while True:
+                        self.logger.info("Captcha required, solving captcha...")
+                        self.get_captcha()
+                        captcha_code = self.solve_captcha()
+
+                        # Create new data for captcha request
+                        captcha_data = {
+                            "val": val,
+                            "captcha1": captcha_code,
+                            "lang_flg": "undefined",
+                            "path": path_with_params,
+                            "ajax_req": "true",
+                            "app_token": self.app_token,
+                        }
+
+                        # Make the second request with captcha to get the PDF
+                        pdf_info_url = "https://judgments.ecourts.gov.in/pdfsearch/?p=pdf_search/openpdf"
+                        pdf_info_response = self.session.post(pdf_info_url, headers=pdf_headers, data=captcha_data)
+                        pdf_info_response.raise_for_status()
+
+                        pdf_info_result = pdf_info_response.json()
+                        self.update_app_token(pdf_info_result)
+
+                        print("Captcha response:")
+                        print(pdf_info_response.text)
+
+                        if "invalid" in pdf_info_result["message"]:
+                            continue
+                        else:
+                            break
 
                 if "outputfile" in pdf_info_result:
                     pdf_url = urljoin("https://judgments.ecourts.gov.in/", pdf_info_result["outputfile"])
@@ -432,7 +573,7 @@ class ECourtsScraper:
                             if chunk:
                                 f.write(chunk)
 
-                    self.logger.info(f"Successfully downloaded PDF to {output_path}")
+                    self.logger.info(f"Successfully downloaded PDF to {output_path} (UUID: {unique_id})")
                     return output_path
 
                 self.logger.error(
@@ -447,6 +588,12 @@ class ECourtsScraper:
         except Exception as e:
             self.logger.error(f"Error downloading judgment: {str(e)}", exc_info=True)
             return None
+
+    def _get_current_timestamp(self):
+        """Helper method to get current timestamp in ISO format"""
+        from datetime import datetime
+
+        return datetime.now().isoformat()
 
     def get_district_data(self, state_code):
         """Get district data for a state"""

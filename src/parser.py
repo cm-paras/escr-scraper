@@ -35,14 +35,29 @@ def setup_logger(name: str = "parser", level: int = logging.INFO) -> logging.Log
 logger = setup_logger()
 
 
-def extract_pdf_path_from_button(onclick_attr: str) -> Optional[str]:
-    """Extract the PDF path from the button's onclick attribute"""
+def extract_pdf_info_from_button(onclick_attr: str) -> Optional[tuple[str, str]]:
+    """Extract the PDF ID and path from the button's onclick attribute
+
+    Returns:
+        Optional tuple of (pdf_id, pdf_path) or None if extraction fails
+    """
     if not onclick_attr:
         logger.warning("Empty onclick attribute provided")
-        return None
+        return None, None
 
+    # Pattern for the format: open_pdf('0','','court/cnrorders/dhcdb/orders/DLHC010281202025_1_2025-05-08.pdf#page=')
+    new_pattern = r"open_pdf\s*\(\s*['\"]([^'\"]*)['\"]?\s*,\s*['\"]([^'\"]*)['\"]?\s*,\s*['\"]([^'\"]+)['\"]"
+    match = re.search(new_pattern, onclick_attr)
+
+    if match:
+        pdf_id = match.group(1).strip()
+        # Skipping the second group as it's empty in your example
+        pdf_path = match.group(3).strip()
+        logger.debug(f"Extracted PDF ID: {pdf_id}, PDF path: {pdf_path[:50]}...")
+        return pdf_id, pdf_path
+
+    # Fallback to previous patterns if the new pattern doesn't match
     patterns = [
-        r"open_pdf\s*\(\s*['\"]?(\d+)['\"]?\s*,\s*['\"]([^'\"]*)['\"]?\s*,\s*['\"]([^'\"]+)['\"]",
         r"open_pdf\('(\d+)',\s*'',\s*'([^']+)'",
         r"open_pdf\(.*?['\"]([^'\"]+\.pdf[^'\"]*)['\"]",
         r"(https?://[^'\"]+\.pdf[^'\"]*)",
@@ -51,12 +66,19 @@ def extract_pdf_path_from_button(onclick_attr: str) -> Optional[str]:
     for pattern in patterns:
         match = re.search(pattern, onclick_attr)
         if match:
-            path = match.group(3 if pattern == patterns[0] else 2 if pattern == patterns[1] else 1).strip()
-            logger.debug(f"Extracted PDF path: {path[:50]}...")
-            return path
+            if pattern == patterns[0]:
+                # This pattern captures both ID and path
+                pdf_id = match.group(1).strip()
+                pdf_path = match.group(2).strip()
+                return pdf_id, pdf_path
+            else:
+                # These patterns only capture the path
+                pdf_path = match.group(1).strip()
+                logger.debug(f"Extracted PDF path only: {pdf_path[:50]}...")
+                return None, pdf_path
 
-    logger.warning(f"Failed to extract PDF path from onclick: {onclick_attr[:100]}...")
-    return None
+    logger.warning(f"Failed to extract PDF info from onclick: {onclick_attr[:100]}...")
+    return None, None
 
 
 def safe_text_extraction(element: Union[Tag, NavigableString, None]) -> str:
@@ -90,9 +112,9 @@ def case_details_parser(res: str) -> Dict[str, Any]:
         soup = BeautifulSoup(res, "html.parser")
 
         # Extract URL
-        pdf_path = extract_pdf_path_from_button(res)
+        pdf_path = extract_pdf_info_from_button(res)
         if pdf_path:
-            data["url"] = pdf_path.replace("&search=%20", "")
+            data["url"] = pdf_path
 
         # Parse button for case details
         button = soup.find("button")
@@ -187,7 +209,7 @@ def extract_judgment_metadata(html_row: str) -> Dict[str, Any]:
 
         button = soup.find("button")
         if button and "onclick" in button.attrs:
-            if pdf_path := extract_pdf_path_from_button(button["onclick"]):
+            if pdf_path := extract_pdf_info_from_button(button["onclick"]):
                 metadata["pdf_url"] = pdf_path
 
         if id_element := soup.find(attrs={"data-judgment-id": True}):
