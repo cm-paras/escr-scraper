@@ -310,3 +310,13 @@ def batch_process_judgments(judgments: List[Dict[str, Any]], processor_func: cal
             results.append(judgment)
 
     return results
+
+
+def extract_years_data(html: str):
+    soup = BeautifulSoup(html, "html.parser")
+    elements = soup.find("div", class_="modal-body").find_all("a")
+    data = {}
+    for ele in elements:
+        year, count = re.split(r"\s+", ele.text)
+        data[year] = count
+    return data

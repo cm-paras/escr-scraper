@@ -97,12 +97,19 @@ class ECourtsScraper:
         "X-Requested-With": "XMLHttpRequest",
     }
 
-    def __init__(self):
+    def __init__(self, state_code="", dist_code=""):
         """Initialize with a session object to maintain cookies"""
         self.logger = setup_logger()
         self.session = requests.Session()
         self.app_token = None
         self.verified = False
+        self.state_code = state_code
+        self.dist_code = dist_code
+
+        if state_code:
+            self.court_code = "2"
+        else:
+            self.court_code = "1"
 
         # Get Azure credentials from environment variables
         subscription_key = os.getenv("COMPUTER_VISION_CLIENT_SUBSCRIPTION_KEY")
@@ -277,7 +284,8 @@ class ECourtsScraper:
                     for line in page_result.lines
                 )
                 self.logger.info(f"Extracted CAPTCHA text: {text}")
-                return self.solve_expression(text.strip())
+                # return self.solve_expression(text.strip())
+                return text
 
             self.logger.error(f"Text extraction failed with status: {get_text_results.status}")
             return "Failed to read text from image"
@@ -326,12 +334,11 @@ class ECourtsScraper:
         page="1",
         search_text="",
         captcha_solution="",
-        state_code="",
-        dist_code="",
-        court_type="2",
-        display_length=10,
+        display_length=100,
         start_from=0,
         search_opt="PHRASE",
+        from_date: str = "",
+        to_date: str = "",
     ):
         """Search for court cases"""
         if not self.verified:
@@ -369,12 +376,12 @@ class ECourtsScraper:
             "search_txt5": "",
             "pet_res": "",
             "state_code": "",
-            "state_code_li": state_code,
-            "dist_code": dist_code,
+            "state_code_li": self.state_code,
+            "dist_code": self.dist_code,
             "case_no": "",
             "case_year": "",
-            "from_date": "",
-            "to_date": "",
+            "from_date": from_date,
+            "to_date": to_date,
             "judge_name": "",
             "reg_year": "",
             "fulltext_case_type": "",
@@ -392,7 +399,7 @@ class ECourtsScraper:
             "disp_nature": "",
             "search_opt": search_opt,
             "date_val": "ALL",
-            "fcourt_type": court_type,
+            "fcourt_type": self.court_code,
             "citation_yr": "",
             "citation_vol": "",
             "citation_supl": "",
@@ -540,7 +547,7 @@ class ECourtsScraper:
                         print("Captcha response:")
                         print(pdf_info_response.text)
 
-                        if "invalid" in pdf_info_result["message"]:
+                        if "invalid" in pdf_info_result["message"].lower():
                             continue
                         else:
                             break
@@ -595,13 +602,13 @@ class ECourtsScraper:
 
         return datetime.now().isoformat()
 
-    def get_district_data(self, state_code):
+    def get_district_data(self):
         """Get district data for a state"""
         try:
             url = f"{self.BASE_URL}?p=pdf_search/get_distData"
-            data = {"state_code": state_code, "ajax_req": "true", "app_token": self.app_token}
+            data = {"state_code": self.state_code, "ajax_req": "true", "app_token": self.app_token}
 
-            self.logger.info(f"Fetching district data for state: {state_code}")
+            self.logger.info(f"Fetching district data for state: {self.state_code}")
             response = self.session.post(url, headers=self.headers, data=data)
             response.raise_for_status()
 
@@ -612,4 +619,102 @@ class ECourtsScraper:
 
         except Exception as e:
             self.logger.error(f"Error getting district data: {str(e)}", exc_info=True)
+            return None
+
+    def get_highcourt_year_data(self):
+
+        headers = {
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Connection": "keep-alive",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Host": "judgments.ecourts.gov.in",
+            "Origin": "https://judgments.ecourts.gov.in",
+            "Referer": "https://judgments.ecourts.gov.in/",
+            "sec-ch-ua": '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Linux"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        try:
+            url = f"{self.BASE_URL}?p=pdf_search/home/nocaptcha/fetchyear/"
+
+            data = {
+                "search_txt": "",
+                "iDisplayStart": "0",
+                "yearflg": "Y",
+                "search_txt1": "",
+                "search_txt2": "",
+                "search_txt3": "",
+                "search_txt4": "",
+                "search_txt5": "",
+                "pet_res": "",
+                "state_code": "",
+                "state_code_li": str(self.state_code),
+                "dist_code": "null",
+                "case_no": "",
+                "case_year": "",
+                "from_date": "",
+                "to_date": "",
+                "judge_name": "",
+                "reg_year": "",
+                "fulltext_case_type": "",
+                "int_fin_party_val": "undefined",
+                "int_fin_case_val": "undefined",
+                "int_fin_court_val": "undefined",
+                "int_fin_decision_val": "undefined",
+                "sel_search_by": "undefined",
+                "sections": "undefined",
+                "judge_txt": "",
+                "act_txt": "",
+                "section_txt": "",
+                "judge_val": "",
+                "act_val": "",
+                "year_val": "",
+                "judge_arr": "",
+                "flag": "",  # This replaces [object HTMLInputElement]
+                "captcha": "undefined",
+                "disp_nature": "",
+                "search_opt": "PHRASE",
+                "date_val": "ALL",
+                "fcourt_type": "2",
+                "citation_yr": "",
+                "citation_vol": "",
+                "citation_supl": "",
+                "citation_page": "",
+                "case_no1": "",
+                "case_year1": "",
+                "pet_res1": "",
+                "fulltext_case_type1": "",
+                "citation_keyword": "",
+                "sel_lang": "",
+                "proximity": "",
+                "neu_cit_year": "",
+                "neu_no": "",
+                "ajax_req": "true",
+                "app_token": self.app_token,
+            }
+
+            self.logger.info(f"Fetching year data for given high court: {self.state_code}")
+            response = self.session.post(url, headers=headers, data=data)
+            response.raise_for_status()
+
+            result = response.json()
+            self.update_app_token(result)
+
+            if "year_dtls" in result:
+                self.logger.info(f"Fetched year data for given high court")
+                return result
+
+            self.logger.warning("No search results found")
+            return None
+
+        except Exception as e:
+            self.logger.error(f"Error getting year data: {str(e)}", exc_info=True)
             return None

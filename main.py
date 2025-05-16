@@ -2,6 +2,8 @@ import logging
 import math
 import os
 import re
+import json
+from datetime import datetime
 from time import sleep
 from typing import Any, Dict, List
 
@@ -11,14 +13,17 @@ from pymongo import MongoClient
 from pymongo.errors import BulkWriteError, ServerSelectionTimeoutError
 
 from src.api import ECourtsScraper
-from src.parser import batch_process_judgments, case_details_parser
+from src.parser import batch_process_judgments, case_details_parser, extract_years_data
+from src.utils import get_all_dates_in_year
+
+from config import *
 
 load_dotenv()
 
-DISPLAY_CASE = 1000
+DISPLAY_CASE = 100
 BATCH_SIZE = 10
-STATE_CODE = 7
-COURT_CODE = 2
+STATE_CODE = HIGH_COURT_OF_DELHI
+COURT_NAME = "HIGH_COURT_OF_DELHI"
 
 
 # Configure logging
@@ -43,6 +48,28 @@ def setup_logger(name: str = "main", level: int = logging.INFO) -> logging.Logge
 
 
 logger = setup_logger()
+
+
+def save_state(state):
+    """Save the current state to a local JSON file"""
+    state_dir = "state_files"
+    os.makedirs(state_dir, exist_ok=True)
+
+    filename = f"{state_dir}/scraper_state_{state['state_code']}.json"
+    with open(filename, "w") as f:
+        json.dump(state, f, indent=2)
+    logger.info(f"State saved to {filename}")
+
+
+def load_state(state_code):
+    """Load state from a local JSON file if it exists"""
+    filename = f"state_files/scraper_state_{state_code}.json"
+    if os.path.exists(filename):
+        with open(filename, "r") as f:
+            state = json.load(f)
+        logger.info(f"Loaded existing state from {filename}")
+        return state
+    return None
 
 
 def upload_to_azure_and_delete_local(
@@ -87,6 +114,8 @@ def process_case_batch(
                 logger.warning(f"No URL found for case: {case_detail.get('title', 'Unknown')}")
                 return case_detail
 
+            case_detail["court"] = COURT_NAME.replace("_", " ").lower()
+
             # Download PDF
             local_path = scraper.download_judgment(case_detail["url"])
             if local_path:
@@ -120,7 +149,6 @@ def process_case_batch(
 
 
 def main():
-
     # Initialize Azure Blob Storage
     azure_connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
     container_name = os.getenv("AZURE_CONTAINER_NAME", "")
@@ -146,54 +174,185 @@ def main():
         raise
 
     try:
+        # Get or initialize state from local file
+        state = load_state(STATE_CODE)
 
-        scraper = ECourtsScraper()
+        if not state:
+            # Initialize new state if not exists
+            state = {
+                "state_code": STATE_CODE,
+                "current_year_index": 0,
+                "current_date_index": 0,
+                "current_request": 0,
+                "current_batch": 0,
+                "completed": False,
+                "years": [],
+                "last_updated": datetime.now().isoformat(),
+            }
+            save_state(state)
+            logger.info(f"Initialized new state for {STATE_CODE}")
+        else:
+            logger.info(f"Resuming from existing state for {STATE_CODE}")
 
-        # Initial search to get total records
-        search_results = scraper.search_cases(
-            state_code=str(STATE_CODE),  # Delhi state code
-            court_type=str(COURT_CODE),  # High Court
-        )
+        scraper = ECourtsScraper(STATE_CODE)
 
-        if not search_results or not search_results.get("reportrow"):
-            logger.error("No search results returned")
-            return
+        # Initializing session
+        _ = scraper.search_cases()
 
-        total_records = int(search_results["reportrow"]["iTotalRecords"])
-        total_requests = math.ceil(total_records / DISPLAY_CASE)
-        logger.info(f"Total records: {total_records}, Total requests: {total_requests}")
+        # Only fetch years data if we haven't already
+        if not state["years"]:
+            # Fetching year data available for given court
+            response = scraper.get_highcourt_year_data()
+            if not response or not response.get("year_dtls"):
+                logger.warning(f"No results for years data")
+                return
 
-        for req_no in range(total_requests):
-            logger.info(f"Processing request {req_no + 1}/{total_requests}")
+            years = extract_years_data(response["year_dtls"])
+            logger.info(f"Total years data available for given court: {len(years)}")
 
-            start_from = req_no * DISPLAY_CASE
-            logger.info(f"Fetching results from index {start_from} with length {DISPLAY_CASE}")
+            # Check if years is a dictionary and convert it to a list if needed
+            if isinstance(years, dict):
+                # Log the structure to understand what we're working with
+                logger.info(f"Years data is a dictionary with keys: {list(years.keys())}")
+                # Convert dictionary to list of years
+                years_list = list(years.keys()) if years else []
+                logger.info(f"Converted to list: {years_list}")
+                state["years"] = years_list
+            else:
+                state["years"] = years
 
-            search_results = scraper.search_cases(
-                state_code=STATE_CODE, court_type=COURT_CODE, start_from=start_from, display_length=DISPLAY_CASE
-            )
+            state["last_updated"] = datetime.now().isoformat()
+            save_state(state)
+        else:
+            years = state["years"]
+            logger.info(f"Using years from saved state: {years}")
 
-            if not search_results or not search_results.get("reportrow"):
-                logger.warning(f"No results for batch starting at {start_from}")
-                return None, None
+        del scraper
 
-            data = search_results["reportrow"]["aaData"]
-            logger.info(f"Retrieved {len(data)} results starting at index {start_from}")
+        # Ensure years is a list
+        if not isinstance(years, list):
+            logger.error(f"Years must be a list, got {type(years)} instead: {years}")
+            years = list(years) if hasattr(years, "__iter__") else [str(years)]
+            logger.info(f"Converted years to list: {years}")
 
-            if data is None or scraper is None:
-                continue
+        # Start processing from where we left off
+        current_year_index = state["current_year_index"]
+        for year_idx in range(current_year_index, len(years)):
+            year = years[year_idx]
 
-            # Process in batches
-            for i in range(0, len(data), BATCH_SIZE):
-                batch = data[i : i + BATCH_SIZE]
-                process_case_batch(batch, scraper, blob_service_client, container_name, collection)
+            # Update the current year index in state
+            state["current_year_index"] = year_idx
+            state["last_updated"] = datetime.now().isoformat()
+            save_state(state)
 
-            sleep(3)
+            # Debug logging
+            logger.info(f"Processing year {year} (index {year_idx})")
 
-        logger.info("Processing complete")
+            dates_in_year = get_all_dates_in_year(int(year))
+            logger.info(f"Generated {len(dates_in_year)} dates for year {year}")
+
+            # If we're continuing from a previous run, start from the saved date index
+            start_date_idx = state["current_date_index"] if year_idx == current_year_index else 0
+
+            for date_idx in range(start_date_idx, len(dates_in_year)):
+                date = dates_in_year[date_idx]
+
+                # Update the current date index in state
+                state["current_date_index"] = date_idx
+                state["current_request"] = 0  # Reset request counter for new date
+                state["current_batch"] = 0  # Reset batch counter for new date
+                state["last_updated"] = datetime.now().isoformat()
+                save_state(state)
+
+                logger.info(f"Processing date: {date}")
+
+                scraper = ECourtsScraper(STATE_CODE)
+                _ = scraper.search_cases()
+
+                search_results = scraper.search_cases(from_date=date, to_date=date, display_length=DISPLAY_CASE)
+                if not search_results or not search_results.get("reportrow"):
+                    logger.error(f"No search results returned for date {date}")
+                    continue
+
+                total_records = int(search_results["reportrow"]["iTotalRecords"])
+                total_requests = math.ceil(total_records / DISPLAY_CASE)
+                logger.info(f"Total records: {total_records}, Total requests: {total_requests}")
+
+                # Start from the saved request number or from 0
+                start_req = (
+                    state["current_request"]
+                    if (year_idx == current_year_index and date_idx == state["current_date_index"])
+                    else 0
+                )
+
+                for req_no in range(start_req, total_requests):
+                    # Update current request in state
+                    state["current_request"] = req_no
+                    state["current_batch"] = 0  # Reset batch counter for new request
+                    state["last_updated"] = datetime.now().isoformat()
+                    save_state(state)
+
+                    logger.info(f"Processing request {req_no + 1}/{total_requests}")
+
+                    start_from = req_no * DISPLAY_CASE
+                    logger.info(f"Fetching results from index {start_from} with length {DISPLAY_CASE}")
+
+                    search_results = scraper.search_cases(
+                        from_date=date, to_date=date, start_from=start_from, display_length=DISPLAY_CASE
+                    )
+
+                    if not search_results or not search_results.get("reportrow"):
+                        logger.warning(f"No results for batch starting at {start_from}")
+                        continue
+
+                    data = search_results["reportrow"]["aaData"]
+                    logger.info(f"Retrieved {len(data)} results starting at index {start_from}")
+
+                    if data is None or scraper is None:
+                        continue
+
+                    # Process in batches with state tracking
+                    start_batch = state["current_batch"] if req_no == state["current_request"] else 0
+                    batch_count = (len(data) + BATCH_SIZE - 1) // BATCH_SIZE  # Calculate total batches
+
+                    for batch_idx in range(start_batch, batch_count):
+                        # Update batch index in state
+                        state["current_batch"] = batch_idx
+                        state["last_updated"] = datetime.now().isoformat()
+                        save_state(state)
+
+                        start_pos = batch_idx * BATCH_SIZE
+                        end_pos = min(start_pos + BATCH_SIZE, len(data))
+                        batch = data[start_pos:end_pos]
+
+                        logger.info(
+                            f"Processing batch {batch_idx + 1}/{batch_count}, items {start_pos} to {end_pos-1}"
+                        )
+                        process_case_batch(batch, scraper, blob_service_client, container_name, collection)
+
+                    sleep(1)
+
+                logger.info(f"Processed data of court {STATE_CODE} of {date}")
+
+            # Reset date index when moving to a new year
+            state["current_date_index"] = 0
+            state["last_updated"] = datetime.now().isoformat()
+            save_state(state)
+
+            logger.info(f"Processed data of court {STATE_CODE} of {year}")
+
+        # Mark as completed
+        state["completed"] = True
+        state["last_updated"] = datetime.now().isoformat()
+        save_state(state)
+
+        logger.info("Processing completed.")
 
     except Exception as e:
         logger.error(f"Error in main processing loop: {str(e)}", exc_info=True)
+        # Log more details about the error
+        logger.error(f"Error type: {type(e)}")
+        logger.error(f"Error trace:", exc_info=True)
     finally:
         mongo_client.close()
         logger.info("MongoDB connection closed")
