@@ -122,7 +122,7 @@ class ECourtsScraper:
             raise ValueError("Azure credentials not configured properly")
 
         self.client = ComputerVisionClient(endpoint, CognitiveServicesCredentials(subscription_key))
-        self.max_captcha_attempts = 5
+        self.max_captcha_attempts = 20
         self.initialize_session()
 
     def initialize_session(self):

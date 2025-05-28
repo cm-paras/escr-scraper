@@ -248,14 +248,14 @@ def main():
             # Debug logging
             logger.info(f"Processing year {year} (index {year_idx})")
 
-            dates_in_year = get_all_dates_in_year(int(year))
-            logger.info(f"Generated {len(dates_in_year)} dates for year {year}")
+            date_ranges_in_a_year = get_all_dates_in_year(int(year), years[year])
+            logger.info(f"Generated {len(date_ranges_in_a_year)} dates for year {year}")
 
             # If we're continuing from a previous run, start from the saved date index
             start_date_idx = state["current_date_index"] if year_idx == current_year_index else 0
 
-            for date_idx in range(start_date_idx, len(dates_in_year)):
-                date = dates_in_year[date_idx]
+            for date_idx in range(start_date_idx, len(date_ranges_in_a_year)):
+                start_date, end_date = date_ranges_in_a_year[date_idx]
 
                 # Update the current date index in state
                 state["current_date_index"] = date_idx
@@ -264,14 +264,16 @@ def main():
                 state["last_updated"] = datetime.now().isoformat()
                 save_state(state)
 
-                logger.info(f"Processing date: {date}")
+                logger.info(f"Processing dates: {start_date}-{end_date}")
 
                 scraper = ECourtsScraper(STATE_CODE)
                 _ = scraper.search_cases()
 
-                search_results = scraper.search_cases(from_date=date, to_date=date, display_length=DISPLAY_CASE)
+                search_results = scraper.search_cases(
+                    from_date=start_date, to_date=end_date, display_length=DISPLAY_CASE
+                )
                 if not search_results or not search_results.get("reportrow"):
-                    logger.error(f"No search results returned for date {date}")
+                    logger.error(f"No search results returned for dates: {start_date}-{end_date}")
                     continue
 
                 total_records = int(search_results["reportrow"]["iTotalRecords"])
@@ -298,7 +300,7 @@ def main():
                     logger.info(f"Fetching results from index {start_from} with length {DISPLAY_CASE}")
 
                     search_results = scraper.search_cases(
-                        from_date=date, to_date=date, start_from=start_from, display_length=DISPLAY_CASE
+                        from_date=start_date, to_date=end_date, start_from=start_from, display_length=DISPLAY_CASE
                     )
 
                     if not search_results or not search_results.get("reportrow"):
@@ -332,7 +334,7 @@ def main():
 
                     sleep(1)
 
-                logger.info(f"Processed data of court {STATE_CODE} of {date}")
+                logger.info(f"Processed data of court {STATE_CODE} from {start_date} to {end_date}")
 
             # Reset date index when moving to a new year
             state["current_date_index"] = 0
