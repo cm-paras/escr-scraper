@@ -186,7 +186,7 @@ def main():
                 "current_request": 0,
                 "current_batch": 0,
                 "completed": False,
-                "years": [],
+                "years": {},
                 "last_updated": datetime.now().isoformat(),
             }
             save_state(state)
@@ -210,16 +210,12 @@ def main():
             years = extract_years_data(response["year_dtls"])
             logger.info(f"Total years data available for given court: {len(years)}")
 
-            # Check if years is a dictionary and convert it to a list if needed
+            # Ensure years is stored as a dictionary in state
             if isinstance(years, dict):
-                # Log the structure to understand what we're working with
-                logger.info(f"Years data is a dictionary with keys: {list(years.keys())}")
-                # Convert dictionary to list of years
-                years_list = list(years.keys()) if years else []
-                logger.info(f"Converted to list: {years_list}")
-                state["years"] = years_list
-            else:
                 state["years"] = years
+            else:
+                # If years is returned as a list, convert to dict (assuming format)
+                state["years"] = {str(year): "0" for year in years} if isinstance(years, list) else {}
 
             state["last_updated"] = datetime.now().isoformat()
             save_state(state)
@@ -229,16 +225,15 @@ def main():
 
         del scraper
 
-        # Ensure years is a list
-        if not isinstance(years, list):
-            logger.error(f"Years must be a list, got {type(years)} instead: {years}")
-            years = list(years) if hasattr(years, "__iter__") else [str(years)]
-            logger.info(f"Converted years to list: {years}")
+        # Convert years dict to a sorted list of year keys for iteration
+        years_list = sorted(years.keys(), reverse=True)  # Sort years in descending order
+        logger.info(f"Processing years: {years_list}")
 
         # Start processing from where we left off
         current_year_index = state["current_year_index"]
-        for year_idx in range(current_year_index, len(years)):
-            year = years[year_idx]
+        for year_idx in range(current_year_index, len(years_list)):
+            year = years_list[year_idx]
+            year_count = years[year]  # Get the count for this year
 
             # Update the current year index in state
             state["current_year_index"] = year_idx
@@ -246,9 +241,10 @@ def main():
             save_state(state)
 
             # Debug logging
-            logger.info(f"Processing year {year} (index {year_idx})")
+            logger.info(f"Processing year {year} with {year_count} records (index {year_idx})")
 
-            date_ranges_in_a_year = get_all_dates_in_year(int(year), years[year])
+            # Generate date ranges for this year using the count from the dictionary
+            date_ranges_in_a_year = get_all_dates_in_year(int(year), int(year_count))
             logger.info(f"Generated {len(date_ranges_in_a_year)} dates for year {year}")
 
             # If we're continuing from a previous run, start from the saved date index
