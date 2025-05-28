@@ -17,7 +17,7 @@ def get_all_dates_in_year(year, total_count):
 
     # Special case: if add_variable is -1, return entire year as one range
     if add_variable == -1:
-        date_ranges.append((start_date.strftime("%d.%m.%Y"), end_date.strftime("%d.%m.%Y")))
+        date_ranges.append((start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")))
         return date_ranges
 
     current_start = start_date
@@ -31,7 +31,7 @@ def get_all_dates_in_year(year, total_count):
             range_end = end_date
 
         # Add the date range tuple (start_date, end_date)
-        date_ranges.append((current_start.strftime("%d.%m.%Y"), range_end.strftime("%d.%m.%Y")))
+        date_ranges.append((current_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d")))
 
         # Move to the next range start (day after current range end)
         current_start = range_end + timedelta(days=1)
