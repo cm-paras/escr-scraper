@@ -1,3 +1,4 @@
+import argparse
 import logging
 import math
 import os
@@ -22,8 +23,8 @@ load_dotenv()
 
 DISPLAY_CASE = 100
 BATCH_SIZE = 10
-STATE_CODE = HIGH_COURT_OF_DELHI
-COURT_NAME = "HIGH_COURT_OF_DELHI"
+STATE_CODE = CALCUTTA_HIGH_COURT
+COURT_NAME = "CALCUTTA_HIGH_COURT"
 
 
 # Configure logging
@@ -50,20 +51,20 @@ def setup_logger(name: str = "main", level: int = logging.INFO) -> logging.Logge
 logger = setup_logger()
 
 
-def save_state(state):
+def save_state(state, server_no):
     """Save the current state to a local JSON file"""
     state_dir = "state_files"
     os.makedirs(state_dir, exist_ok=True)
 
-    filename = f"{state_dir}/scraper_state_{state['state_code']}.json"
+    filename = f"{state_dir}/scraper_state_{state['state_code']}_{server_no}.json"
     with open(filename, "w") as f:
         json.dump(state, f, indent=2)
     logger.info(f"State saved to {filename}")
 
 
-def load_state(state_code):
+def load_state(state_code, server_no):
     """Load state from a local JSON file if it exists"""
-    filename = f"state_files/scraper_state_{state_code}.json"
+    filename = f"state_files/scraper_state_{state_code}_{server_no}.json"
     if os.path.exists(filename):
         with open(filename, "r") as f:
             state = json.load(f)
@@ -148,7 +149,106 @@ def process_case_batch(
         logger.error(f"MongoDB connection error: {str(sste)}", exc_info=True)
 
 
+def divide_data(data, n):
+    """
+    Divides the input data (year: count) into n parts with approximately equal counts.
+
+    Args:
+        data (dict): A dictionary where keys are years (strings) and values are counts (strings).
+        n (int): The number of parts to divide the data into.
+
+    Returns:
+        list: A list of n dictionaries, where each dictionary represents a part of the data.
+              Each part contains a subset of the original data with approximately equal counts.
+    """
+
+    print("years", data)
+    print("count", n)
+
+    # Convert counts to integers
+    data = {year: int(count) for year, count in data.items()}
+
+    # Sort the data by year
+    sorted_data = sorted(data.items())
+
+    # Calculate the total count
+    total_count = sum(data.values())
+
+    # Calculate the target count for each part
+    target_count = total_count / n
+
+    # Initialize the result list
+    result = [{} for _ in range(n)]
+
+    # Initialize the current part index
+    part_index = 0
+
+    # Initialize the current part count
+    current_count = 0
+
+    # Iterate over the sorted data
+    for year, count in sorted_data:
+        # If adding the current data point exceeds the target count,
+        # split the data point into the current part and the next part
+        if current_count + count > target_count:
+            # Calculate the amount of count to add to the current part
+            add_to_current = round(target_count - current_count, 6)
+
+            # Add the amount to the current part
+            result[part_index][year] = int(add_to_current)
+
+            # Increment the part index
+            part_index += 1
+
+            # If we have reached the end of the result list, break the loop
+            if part_index >= n:
+                break
+
+            # Calculate the amount of count to add to the next part
+            add_to_next = round(count - add_to_current, 6)
+
+            # Initialize the current count with the amount to add to the next part
+            current_count = add_to_next
+
+            # Add the amount to the next part
+            result[part_index][year] = int(add_to_next)
+        else:
+            # Add the data point to the current part
+            result[part_index][year] = count
+
+            # Increment the current count
+            current_count += count
+
+        # If the current count equals the target count,
+        # move to the next part
+        if abs(current_count - target_count) < 1e-6:
+            part_index += 1
+            current_count = 0
+
+        # If we have reached the end of the result list, break the loop
+        if part_index >= n:
+            break
+
+    # If there are any remaining data points, add them to the last part
+    if part_index < n and sorted_data[0][0] not in result[-1]:
+        remaining_data = dict(sorted_data[len(result[0]) :])
+        result[-1].update(remaining_data)
+
+    # Convert counts back to strings and sort keys
+    result = [{year: str(count) for year, count in sorted(part.items())} for part in result]
+
+    return result
+
+
 def main():
+    parser = argparse.ArgumentParser(description="ECourts Scraper with data division")
+    parser.add_argument("-c", "--server_count", type=int, help="Number of servers to divide data into", required=True)
+    parser.add_argument("-s", "--server_no", type=int, help="Server number to process", required=True)
+    args = parser.parse_args()
+
+    server_count = args.server_count
+    server_no = args.server_no
+
     # Initialize Azure Blob Storage
     azure_connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
     container_name = os.getenv("AZURE_CONTAINER_NAME", "")
@@ -175,7 +275,7 @@ def main():
 
     try:
         # Get or initialize state from local file
-        state = load_state(STATE_CODE)
+        state = load_state(STATE_CODE, server_no)
 
         if not state:
             # Initialize new state if not exists
@@ -189,7 +289,7 @@ def main():
                 "years": {},
                 "last_updated": datetime.now().isoformat(),
             }
-            save_state(state)
+            save_state(state, server_no)
             logger.info(f"Initialized new state for {STATE_CODE}")
         else:
             logger.info(f"Resuming from existing state for {STATE_CODE}")
@@ -218,12 +318,23 @@ def main():
                 state["years"] = {str(year): "0" for year in years} if isinstance(years, list) else {}
 
             state["last_updated"] = datetime.now().isoformat()
-            save_state(state)
+            save_state(state, server_no)
         else:
             years = state["years"]
             logger.info(f"Using years from saved state: {years}")
 
         del scraper
+
+        # Divide the years data based on server count
+        divided_years = divide_data(years, server_count)
+
+        # Get the years data for the current server
+        if 1 <= server_no <= len(divided_years):
+            years = divided_years[server_no - 1]
+            logger.info(f"Processing data for server {server_no} with years: {years}")
+        else:
+            logger.error(f"Invalid server number: {server_no}. Must be between 1 and {len(divided_years)}")
+            return
 
         # Convert years dict to a sorted list of year keys for iteration
         years_list = sorted(years.keys(), reverse=True)  # Sort years in descending order
@@ -238,7 +349,7 @@ def main():
             # Update the current year index in state
             state["current_year_index"] = year_idx
             state["last_updated"] = datetime.now().isoformat()
-            save_state(state)
+            save_state(state, server_no)
 
             # Debug logging
             logger.info(f"Processing year {year} with {year_count} records (index {year_idx})")
@@ -258,7 +369,7 @@ def main():
                 state["current_request"] = 0  # Reset request counter for new date
                 state["current_batch"] = 0  # Reset batch counter for new date
                 state["last_updated"] = datetime.now().isoformat()
-                save_state(state)
+                save_state(state, server_no)
 
                 logger.info(f"Processing dates: {start_date}-{end_date}")
 
@@ -288,7 +399,7 @@ def main():
                     state["current_request"] = req_no
                     state["current_batch"] = 0  # Reset batch counter for new request
                     state["last_updated"] = datetime.now().isoformat()
-                    save_state(state)
+                    save_state(state, server_no)
 
                     logger.info(f"Processing request {req_no + 1}/{total_requests}")
 
@@ -317,7 +428,7 @@ def main():
                         # Update batch index in state
                         state["current_batch"] = batch_idx
                         state["last_updated"] = datetime.now().isoformat()
-                        save_state(state)
+                        save_state(state, server_no)
 
                         start_pos = batch_idx * BATCH_SIZE
                         end_pos = min(start_pos + BATCH_SIZE, len(data))
@@ -335,14 +446,14 @@ def main():
             # Reset date index when moving to a new year
             state["current_date_index"] = 0
             state["last_updated"] = datetime.now().isoformat()
-            save_state(state)
+            save_state(state, server_no)
 
             logger.info(f"Processed data of court {STATE_CODE} of {year}")
 
         # Mark as completed
         state["completed"] = True
         state["last_updated"] = datetime.now().isoformat()
-        save_state(state)
+        save_state(state, server_no)
 
         logger.info("Processing completed.")
 
