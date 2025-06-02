@@ -23,8 +23,8 @@ load_dotenv()
 
 DISPLAY_CASE = 100
 BATCH_SIZE = 10
-STATE_CODE = CALCUTTA_HIGH_COURT
-COURT_NAME = "CALCUTTA_HIGH_COURT"
+STATE_CODE = ALLAHABAD_HIGH_COURT
+COURT_NAME = "ALLAHABAD_HIGH_COURT"
 
 
 # Configure logging
@@ -152,6 +152,7 @@ def process_case_batch(
 def divide_data(data, n):
     """
     Divides the input data (year: count) into n parts with approximately equal counts.
+    Each year appears in only one part with its actual count.
 
     Args:
         data (dict): A dictionary where keys are years (strings) and values are counts (strings).
@@ -161,9 +162,6 @@ def divide_data(data, n):
         list: A list of n dictionaries, where each dictionary represents a part of the data.
               Each part contains a subset of the original data with approximately equal counts.
     """
-
-    print("years", data)
-    print("count", n)
 
     # Convert counts to integers
     data = {year: int(count) for year, count in data.items()}
@@ -188,51 +186,25 @@ def divide_data(data, n):
 
     # Iterate over the sorted data
     for year, count in sorted_data:
-        # If adding the current data point exceeds the target count,
-        # split the data point into the current part and the next part
-        if current_count + count > target_count:
-            # Calculate the amount of count to add to the current part
-            add_to_current = round(target_count - current_count, 6)
+        # If we've filled all parts except the last one, put remaining items in the last part
+        if part_index >= n - 1:
+            result[n - 1][year] = count
+            continue
 
-            # Add the amount to the current part
-            result[part_index][year] = int(add_to_current)
-
-            # Increment the part index
-            part_index += 1
-
-            # If we have reached the end of the result list, break the loop
-            if part_index >= n:
-                break
-
-            # Calculate the amount of count to add to the next part
-            add_to_next = round(count - add_to_current, 6)
-
-            # Initialize the current count with the amount to add to the next part
-            current_count = add_to_next
-
-            # Add the amount to the next part
-            result[part_index][year] = int(add_to_next)
-        else:
-            # Add the data point to the current part
-            result[part_index][year] = count
-
-            # Increment the current count
-            current_count += count
-
-        # If the current count equals the target count,
-        # move to the next part
-        if abs(current_count - target_count) < 1e-6:
+        # If adding the current data point would exceed the target count significantly,
+        # and we're not on the last part, move to the next part
+        if current_count + count > target_count * 1.1 and current_count > 0:
             part_index += 1
             current_count = 0
 
-        # If we have reached the end of the result list, break the loop
-        if part_index >= n:
-            break
+        # Add the data point to the current part
+        result[part_index][year] = count
+        current_count += count
 
-    # If there are any remaining data points, add them to the last part
-    if part_index < n and sorted_data[0][0] not in result[-1]:
-        remaining_data = dict(sorted_data[len(result[0]) :])
-        result[-1].update(remaining_data)
+        # If we've reached or exceeded the target count, consider moving to next part
+        if current_count >= target_count:
+            part_index += 1
+            current_count = 0
 
     # Convert counts back to strings and sort keys
     result = [{year: str(count) for year, count in sorted(part.items())} for part in result]
