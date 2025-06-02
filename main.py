@@ -21,10 +21,10 @@ from config import *
 
 load_dotenv()
 
-DISPLAY_CASE = 100
-BATCH_SIZE = 10
-STATE_CODE = ALLAHABAD_HIGH_COURT
-COURT_NAME = "ALLAHABAD_HIGH_COURT"
+DISPLAY_CASE = 25
+BATCH_SIZE = 25
+STATE_CODE = CALCUTTA_HIGH_COURT
+COURT_NAME = "CALCUTTA_HIGH_COURT"
 
 
 # Configure logging
@@ -366,7 +366,12 @@ def main():
                     else 0
                 )
 
+                del scraper
+
                 for req_no in range(start_req, total_requests):
+                    scraper = ECourtsScraper(STATE_CODE)
+                    _ = scraper.search_cases()
+
                     # Update current request in state
                     state["current_request"] = req_no
                     state["current_batch"] = 0  # Reset batch counter for new request
@@ -376,11 +381,16 @@ def main():
                     logger.info(f"Processing request {req_no + 1}/{total_requests}")
 
                     start_from = req_no * DISPLAY_CASE
-                    logger.info(f"Fetching results from index {start_from} with length {DISPLAY_CASE}")
+                    # logger.info(f"Fetching results from index {start_from} with length {DISPLAY_CASE}")
 
-                    search_results = scraper.search_cases(
-                        from_date=start_date, to_date=end_date, start_from=start_from, display_length=DISPLAY_CASE
-                    )
+                    for i in range(req_no + 1):
+                        search_results = scraper.search_cases(
+                            from_date=start_date,
+                            to_date=end_date,
+                            start_from=i * DISPLAY_CASE,
+                            display_length=DISPLAY_CASE,
+                            page=i,
+                        )
 
                     if not search_results or not search_results.get("reportrow"):
                         logger.warning(f"No results for batch starting at {start_from}")
@@ -410,6 +420,8 @@ def main():
                             f"Processing batch {batch_idx + 1}/{batch_count}, items {start_pos} to {end_pos-1}"
                         )
                         process_case_batch(batch, scraper, blob_service_client, container_name, collection)
+
+                    del scraper
 
                     sleep(1)
 
