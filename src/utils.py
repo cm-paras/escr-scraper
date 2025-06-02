@@ -49,7 +49,8 @@ def date_gap(total_count):
 
     gap_days = math.floor(200 / avg_judgement_per_day)
 
-    if gap_days < 0:
+    # Fix the logic to handle edge cases
+    if gap_days <= 0:  # Changed from < 0 to <= 0
         return 1
     elif gap_days > 365:
         return -1
@@ -58,5 +59,7 @@ def date_gap(total_count):
 
 
 if __name__ == "__main__":
-    ranges = get_all_dates_in_year(2024, 25)
-    print(ranges)
+    # Test with your problematic case
+    ranges = get_all_dates_in_year(2022, 81610)
+    print("Number of ranges:", len(ranges))
+    print("First few ranges:", ranges[:5])
